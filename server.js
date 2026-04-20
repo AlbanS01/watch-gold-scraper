@@ -1,8 +1,6 @@
 const express = require('express');
 const cors = require('cors');
 const https = require('https');
-const http = require('http');
-
 const app = express();
 app.use(cors());
 
@@ -15,30 +13,19 @@ let cache = {
 
 function fetchJSON(url) {
   return new Promise((resolve, reject) => {
-    const protocol = url.startsWith('https') ? https : http;
-    const req = protocol.get(url, {
+    https.get(url, {
       headers: { 
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'User-Agent': 'Mozilla/5.0',
         'Accept': 'application/json'
       }
     }, (res) => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        fetchJSON(res.headers.location).then(resolve).catch(reject);
-        return;
-      }
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
-        if (!data || data.trim() === '') {
-          reject(new Error('Empty response'));
-          return;
-        }
         try { resolve(JSON.parse(data)); }
         catch(e) { reject(new Error('Parse error')); }
       });
-    });
-    req.on('error', reject);
-    req.setTimeout(8000, () => { req.destroy(); reject(new Error('timeout')); });
+    }).on('error', reject);
   });
 }
 
@@ -46,46 +33,29 @@ async function updatePrices() {
   try {
     console.log(`[${new Date().toISOString()}] Updating prices...`);
     
-    let taux = null;
-    try {
-      const d = await fetchJSON('https://open.er-api.com/v6/latest/USD');
-      if (d.rates && d.rates.EUR) taux = d.rates.EUR;
-    } catch(e) {}
+    const apiKey = process.env.METAL_API_KEY;
+    const url = `https://api.metalpriceapi.com/v1/latest?api_key=${apiKey}&base=USD&currencies=XAU,XAG`;
     
-    if (!taux) {
-      try {
-        const d = await fetchJSON('https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json');
-        if (d.usd && d.usd.eur) taux = d.usd.eur;
-      } catch(e) {}
+    const data = await fetchJSON(url);
+    
+    if (data.rates && data.rates.XAU && data.rates.XAG) {
+      const usdEur = 0.92;
+      const ozEnKg = 32.1507;
+      cache.or = (1 / data.rates.XAU) * ozEnKg * usdEur;
+      cache.ag = (1 / data.rates.XAG) * ozEnKg * usdEur;
+      cache.timestamp = new Date().toISOString();
+      cache.status = 'ok';
+      console.log(`✓ Updated - Or: ${cache.or.toFixed(2)}, Ag: ${cache.ag.toFixed(2)}`);
+    } else {
+      cache.status = 'error';
     }
-    
-    if (!taux) taux = 0.92;
-    
-    try {
-      const d = await fetchJSON('https://api.metals.live/v1/spot/metals?symbols=AU,AG');
-      if (d.metals && d.metals.AU && d.metals.AG) {
-        cache.or = d.metals.AU;
-        cache.ag = d.metals.AG;
-        cache.timestamp = new Date().toISOString();
-        cache.status = 'ok';
-        console.log(`✓ Updated - Or: ${cache.or.toFixed(2)}, Ag: ${cache.ag.toFixed(2)}`);
-        return;
-      }
-    } catch(e) {
-      console.warn('metals.live error:', e.message);
-    }
-    
-    cache.status = 'error';
   } catch(e) {
     console.error('Update error:', e.message);
     cache.status = 'error';
   }
 }
 
-// Update immediately on startup
 updatePrices();
-
-// Update every 15 minutes
 setInterval(updatePrices, 15 * 60 * 1000);
 
 app.get('/api/cours', (req, res) => {
@@ -93,7 +63,7 @@ app.get('/api/cours', (req, res) => {
     or: cache.or,
     ag: cache.ag,
     timestamp: cache.timestamp,
-    source: 'metals.live',
+    source: 'metalpriceapi.com',
     status: cache.status
   });
 });
